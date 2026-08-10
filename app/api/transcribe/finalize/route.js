@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import Anthropic from "@anthropic-ai/sdk";
+import OpenAI from "openai";
 
 export async function POST(req) {
   try {
@@ -8,7 +8,12 @@ export async function POST(req) {
       process.env.SUPABASE_URL,
       process.env.SUPABASE_SERVICE_ROLE_KEY
     );
-    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    // NVIDIA expõe LLMs num endpoint compatível com a API da OpenAI,
+    // então usamos o próprio SDK da OpenAI apontando pra base da NVIDIA.
+    const nvidia = new OpenAI({
+      apiKey: process.env.NVIDIA_API_KEY,
+      baseURL: "https://integrate.api.nvidia.com/v1",
+    });
 
     const { meetingId } = await req.json();
     if (!meetingId) {
@@ -29,9 +34,9 @@ export async function POST(req) {
 
     const transcript = chunks.map((c) => c.transcript).join("\n\n");
 
-    // Gera a ata estruturada com Claude a partir da transcrição completa
-    const summaryResponse = await anthropic.messages.create({
-      model: "claude-sonnet-4-6",
+    // Gera a ata estruturada com um LLM da NVIDIA a partir da transcrição completa
+    const summaryResponse = await nvidia.chat.completions.create({
+      model: "meta/llama-3.3-70b-instruct",
       max_tokens: 1500,
       messages: [
         {
@@ -41,10 +46,7 @@ export async function POST(req) {
       ],
     });
 
-    const summary = summaryResponse.content
-      .filter((block) => block.type === "text")
-      .map((block) => block.text)
-      .join("\n");
+    const summary = summaryResponse.choices[0]?.message?.content ?? "";
 
     // Salva o registro final da reunião
     const { data: meeting, error: dbError } = await supabase
