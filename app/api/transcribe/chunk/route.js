@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import OpenAI from "openai";
+import OpenAI, { toFile } from "openai";
 
 // Recebe UM bloco de ~8min de áudio, transcreve na hora e salva o
 // resultado em meeting_chunks. Não gera resumo aqui — isso só acontece
@@ -11,7 +11,11 @@ export async function POST(req) {
       process.env.SUPABASE_URL,
       process.env.SUPABASE_SERVICE_ROLE_KEY
     );
-    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    const openai = new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY,
+      maxRetries: 3,
+      timeout: 60000,
+    });
 
     const formData = await req.formData();
     const file = formData.get("file");
@@ -31,9 +35,12 @@ export async function POST(req) {
       .upload(filePath, buffer, { contentType: "audio/webm" });
     if (uploadError) throw uploadError;
 
-    // Transcreve esse bloco isoladamente
+    // Transcreve esse bloco isoladamente. Usamos toFile() (forma oficial do
+    // SDK) em vez de new File([buffer]) — a construção manual costuma gerar
+    // um multipart com content-length inconsistente, e a OpenAI derruba a
+    // conexão no meio do upload (ECONNRESET).
     const transcription = await openai.audio.transcriptions.create({
-      file: new File([buffer], `chunk-${chunkIndex}.webm`, { type: "audio/webm" }),
+      file: await toFile(buffer, `chunk-${chunkIndex}.webm`, { type: "audio/webm" }),
       model: "whisper-1",
       language: "pt",
     });
