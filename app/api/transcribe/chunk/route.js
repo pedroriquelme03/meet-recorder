@@ -1,6 +1,13 @@
 import { NextResponse } from "next/server";
+import { Agent } from "https";
 import { createClient } from "@supabase/supabase-js";
 import OpenAI, { toFile } from "openai";
+
+// Sem keep-alive: o agente padrão do SDK (agentkeepalive) reaproveita
+// conexões TCP que, em serverless, frequentemente já foram fechadas pela
+// OpenAI, causando `read ECONNRESET` no upload do áudio. Forçar conexão
+// nova por request resolve.
+const httpAgent = new Agent({ keepAlive: false });
 
 // Recebe UM bloco de ~8min de áudio, transcreve na hora e salva o
 // resultado em meeting_chunks. Não gera resumo aqui — isso só acontece
@@ -15,6 +22,7 @@ export async function POST(req) {
       apiKey: process.env.OPENAI_API_KEY,
       maxRetries: 3,
       timeout: 60000,
+      httpAgent,
     });
 
     const formData = await req.formData();
