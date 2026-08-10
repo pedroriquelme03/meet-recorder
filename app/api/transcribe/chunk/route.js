@@ -1,9 +1,10 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
-// Recebe UM bloco de ~8min de áudio, transcreve na hora e salva o
-// resultado em meeting_chunks. Não gera resumo aqui — isso só acontece
-// no /finalize, depois que todos os blocos chegaram.
+// Recebe UM bloco de vídeo (tela + áudio) e apenas ARMAZENA: sobe o arquivo
+// pro Storage e registra o bloco em meeting_chunks (sem transcript ainda).
+// A transcrição NÃO acontece aqui — só quando o usuário clicar em
+// "Transcrever" na página, que dispara /api/transcribe/run.
 export async function POST(req) {
   try {
     const supabase = createClient(
@@ -23,48 +24,18 @@ export async function POST(req) {
     const buffer = Buffer.from(await file.arrayBuffer());
     const filePath = `reunioes/${meetingId}/chunk-${chunkIndex}.webm`;
 
-    // Guarda o áudio original como backup (opcional, mas útil pra reprocessar)
+    // Sobe o vídeo do bloco pro Storage (upsert pra permitir regravar o mesmo path)
     const { error: uploadError } = await supabase.storage
       .from("recordings")
-      .upload(filePath, buffer, { contentType: "audio/webm" });
+      .upload(filePath, buffer, { contentType: "video/webm", upsert: true });
     if (uploadError) throw uploadError;
 
-    // Transcreve esse bloco isoladamente. Chamamos o Whisper direto com o
-    // fetch nativo (undici) em vez do SDK da OpenAI: o transporte node-fetch
-    // do SDK v4 estava resetando a conexão (ECONNRESET) no upload do áudio
-    // em serverless. O undici lida com isso de forma bem mais estável.
-    // Mesma semântica de antes: model whisper-1, language pt.
-    const whisperForm = new FormData();
-    whisperForm.append(
-      "file",
-      new Blob([buffer], { type: "audio/webm" }),
-      `chunk-${chunkIndex}.webm`
-    );
-    whisperForm.append("model", "whisper-1");
-    whisperForm.append("language", "pt");
-
-    const whisperRes = await fetch(
-      "https://api.openai.com/v1/audio/transcriptions",
-      {
-        method: "POST",
-        headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
-        body: whisperForm,
-      }
-    );
-
-    if (!whisperRes.ok) {
-      const detail = await whisperRes.text();
-      throw new Error(`Whisper retornou ${whisperRes.status}: ${detail}`);
-    }
-
-    const transcription = await whisperRes.json();
-
-    // Salva o texto do bloco, ordenado por chunkIndex
+    // Registra o bloco (transcript fica null até rodar a transcrição)
     const { error: dbError } = await supabase.from("meeting_chunks").insert({
       meeting_id: meetingId,
       chunk_index: chunkIndex,
       file_path: filePath,
-      transcript: transcription.text,
+      transcript: null,
     });
     if (dbError) throw dbError;
 
