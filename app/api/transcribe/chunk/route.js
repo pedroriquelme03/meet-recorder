@@ -1,13 +1,5 @@
 import { NextResponse } from "next/server";
-import { Agent } from "https";
 import { createClient } from "@supabase/supabase-js";
-import OpenAI, { toFile } from "openai";
-
-// Sem keep-alive: o agente padrão do SDK (agentkeepalive) reaproveita
-// conexões TCP que, em serverless, frequentemente já foram fechadas pela
-// OpenAI, causando `read ECONNRESET` no upload do áudio. Forçar conexão
-// nova por request resolve.
-const httpAgent = new Agent({ keepAlive: false });
 
 // Recebe UM bloco de ~8min de áudio, transcreve na hora e salva o
 // resultado em meeting_chunks. Não gera resumo aqui — isso só acontece
@@ -18,12 +10,6 @@ export async function POST(req) {
       process.env.SUPABASE_URL,
       process.env.SUPABASE_SERVICE_ROLE_KEY
     );
-    const openai = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY,
-      maxRetries: 3,
-      timeout: 60000,
-      httpAgent,
-    });
 
     const formData = await req.formData();
     const file = formData.get("file");
@@ -43,15 +29,35 @@ export async function POST(req) {
       .upload(filePath, buffer, { contentType: "audio/webm" });
     if (uploadError) throw uploadError;
 
-    // Transcreve esse bloco isoladamente. Usamos toFile() (forma oficial do
-    // SDK) em vez de new File([buffer]) — a construção manual costuma gerar
-    // um multipart com content-length inconsistente, e a OpenAI derruba a
-    // conexão no meio do upload (ECONNRESET).
-    const transcription = await openai.audio.transcriptions.create({
-      file: await toFile(buffer, `chunk-${chunkIndex}.webm`, { type: "audio/webm" }),
-      model: "whisper-1",
-      language: "pt",
-    });
+    // Transcreve esse bloco isoladamente. Chamamos o Whisper direto com o
+    // fetch nativo (undici) em vez do SDK da OpenAI: o transporte node-fetch
+    // do SDK v4 estava resetando a conexão (ECONNRESET) no upload do áudio
+    // em serverless. O undici lida com isso de forma bem mais estável.
+    // Mesma semântica de antes: model whisper-1, language pt.
+    const whisperForm = new FormData();
+    whisperForm.append(
+      "file",
+      new Blob([buffer], { type: "audio/webm" }),
+      `chunk-${chunkIndex}.webm`
+    );
+    whisperForm.append("model", "whisper-1");
+    whisperForm.append("language", "pt");
+
+    const whisperRes = await fetch(
+      "https://api.openai.com/v1/audio/transcriptions",
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
+        body: whisperForm,
+      }
+    );
+
+    if (!whisperRes.ok) {
+      const detail = await whisperRes.text();
+      throw new Error(`Whisper retornou ${whisperRes.status}: ${detail}`);
+    }
+
+    const transcription = await whisperRes.json();
 
     // Salva o texto do bloco, ordenado por chunkIndex
     const { error: dbError } = await supabase.from("meeting_chunks").insert({
