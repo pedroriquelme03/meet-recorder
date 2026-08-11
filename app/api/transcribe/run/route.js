@@ -1,6 +1,8 @@
-﻿import { NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import OpenAI from "openai";
+import FormData from "form-data";
+import { Readable } from "stream";
 
 export async function POST(req) {
   const LOG_PREFIX = "[transcribe/run]";
@@ -62,15 +64,6 @@ export async function POST(req) {
       const buffer = Buffer.from(await fileData.arrayBuffer());
       console.log(`${LOG_PREFIX} Bloco ${chunk.chunk_index} baixado: ${buffer.length} bytes`);
 
-      const form = new FormData();
-      form.append(
-        "file",
-        new Blob([buffer], { type: "video/webm" }),
-        `chunk-${chunk.chunk_index}.webm`
-      );
-      form.append("model", "whisper-large-v3");
-      form.append("language", "pt");
-
       console.log(`${LOG_PREFIX} Enviando bloco ${chunk.chunk_index} para Groq (${buffer.length} bytes)...`);
 
       let transcription;
@@ -79,6 +72,12 @@ export async function POST(req) {
 
       for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
         try {
+          // Usa form-data para construir o multipart corretamente
+          const form = new FormData();
+          form.append("model", "whisper-large-v3");
+          form.append("language", "pt");
+          form.append("file", Readable.from(buffer), `chunk-${chunk.chunk_index}.webm`);
+
           const controller = new AbortController();
           const timeoutId = setTimeout(() => controller.abort(), 30000);
 
@@ -86,7 +85,7 @@ export async function POST(req) {
             "https://api.groq.com/openai/v1/audio/transcriptions",
             {
               method: "POST",
-              headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
+              headers: form.getHeaders(),
               body: form,
               signal: controller.signal,
             }
