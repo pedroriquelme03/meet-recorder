@@ -2,11 +2,12 @@
 import { createClient } from "@supabase/supabase-js";
 import OpenAI from "openai";
 
-// Transcrição sob demanda de uma reunião já gravada. Percorre os blocos
-// (vídeos no Storage), transcreve cada um no Whisper, junta o texto e gera
-// a ata com a NVIDIA. Disparado pelo botão "Transcrever" da página /reunioes.
 export async function POST(req) {
+  const LOG_PREFIX = "[transcribe/run]";
+
   try {
+    console.log(`${LOG_PREFIX} Iniciando transcrição`);
+
     const supabase = createClient(
       process.env.SUPABASE_URL,
       process.env.SUPABASE_SERVICE_ROLE_KEY
@@ -20,6 +21,8 @@ export async function POST(req) {
     if (!meetingId) {
       return NextResponse.json({ error: "meetingId faltando" }, { status: 400 });
     }
+
+    console.log(`${LOG_PREFIX} meetingId: ${meetingId}`);
 
     const { data: chunks, error: fetchError } = await supabase
       .from("meeting_chunks")
@@ -35,21 +38,29 @@ export async function POST(req) {
       );
     }
 
+    console.log(`${LOG_PREFIX} ${chunks.length} bloco(s) encontrado(s)`);
+
     await supabase
       .from("meetings")
       .update({ status: "transcrevendo" })
       .eq("id", meetingId);
 
-    // Transcreve bloco a bloco. Reaproveita transcript já feito (idempotente).
+    // Transcreve bloco a bloco
     for (const chunk of chunks) {
-      if (chunk.transcript) continue;
+      if (chunk.transcript) {
+        console.log(`${LOG_PREFIX} Bloco ${chunk.chunk_index} já tem transcrição, pulando`);
+        continue;
+      }
+
+      console.log(`${LOG_PREFIX} Baixando bloco ${chunk.chunk_index}...`);
 
       const { data: fileData, error: dlError } = await supabase.storage
         .from("recordings")
         .download(chunk.file_path);
-      if (dlError) throw dlError;
+      if (dlError) throw new Error(`Erro ao baixar bloco ${chunk.chunk_index}: ${dlError.message}`);
 
       const buffer = Buffer.from(await fileData.arrayBuffer());
+      console.log(`${LOG_PREFIX} Bloco ${chunk.chunk_index} baixado: ${buffer.length} bytes`);
 
       const form = new FormData();
       form.append(
@@ -60,19 +71,52 @@ export async function POST(req) {
       form.append("model", "whisper-large-v3");
       form.append("language", "pt");
 
-      const res = await fetch(
-        "https://api.groq.com/openai/v1/audio/transcriptions",
-        {
-          method: "POST",
-          headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
-          body: form,
+      console.log(`${LOG_PREFIX} Enviando bloco ${chunk.chunk_index} para Groq (${buffer.length} bytes)...`);
+
+      let transcription;
+      let lastError;
+      const MAX_RETRIES = 3;
+
+      for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+        try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 30000);
+
+          const res = await fetch(
+            "https://api.groq.com/openai/v1/audio/transcriptions",
+            {
+              method: "POST",
+              headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
+              body: form,
+              signal: controller.signal,
+            }
+          );
+
+          clearTimeout(timeoutId);
+
+          if (!res.ok) {
+            const detail = await res.text();
+            throw new Error(`Groq retornou ${res.status}: ${detail}`);
+          }
+
+          transcription = await res.json();
+          console.log(`${LOG_PREFIX} Bloco ${chunk.chunk_index} transcrito (tentativa ${attempt}/${MAX_RETRIES}): ${transcription.text.length} caracteres`);
+          break;
+        } catch (err) {
+          lastError = err;
+          console.warn(`${LOG_PREFIX} Tentativa ${attempt}/${MAX_RETRIES} falhou para bloco ${chunk.chunk_index}: ${err.message}`);
+
+          if (attempt < MAX_RETRIES) {
+            const waitTime = Math.pow(2, attempt - 1) * 1000;
+            console.log(`${LOG_PREFIX} Aguardando ${waitTime}ms antes de tentar novamente...`);
+            await new Promise(resolve => setTimeout(resolve, waitTime));
+          }
         }
-      );
-      if (!res.ok) {
-        const detail = await res.text();
-        throw new Error(`Groq Whisper retornou ${res.status}: ${detail}`);
       }
-      const transcription = await res.json();
+
+      if (!transcription) {
+        throw lastError;
+      }
 
       await supabase
         .from("meeting_chunks")
@@ -82,9 +126,11 @@ export async function POST(req) {
       chunk.transcript = transcription.text;
     }
 
-    const transcript = chunks.map((c) => c.transcript).join("\n\n");
+    console.log(`${LOG_PREFIX} Todos os blocos transcritos, gerando resumo...`);
 
-    // Gera a ata estruturada com um LLM da NVIDIA
+    const transcript = chunks.map((c) => c.transcript).join("\n\n");
+    console.log(`${LOG_PREFIX} Transcrição total: ${transcript.length} caracteres`);
+
     const summaryResponse = await nvidia.chat.completions.create({
       model: "meta/llama-3.3-70b-instruct",
       max_tokens: 1500,
@@ -97,6 +143,7 @@ export async function POST(req) {
     });
 
     const summary = summaryResponse.choices[0]?.message?.content ?? "";
+    console.log(`${LOG_PREFIX} Resumo gerado: ${summary.length} caracteres`);
 
     const { data: meeting, error: dbError } = await supabase
       .from("meetings")
@@ -111,9 +158,16 @@ export async function POST(req) {
       .single();
     if (dbError) throw dbError;
 
+    console.log(`${LOG_PREFIX} Transcrição concluída com sucesso`);
     return NextResponse.json({ transcript, summary, meeting });
   } catch (err) {
-    console.error("Erro no /api/transcribe/run:", err);
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    console.error(`${LOG_PREFIX} Erro:`, err);
+
+    let errorMsg = err.message;
+    if (err.name === "AbortError") {
+      errorMsg = "Timeout ao enviar áudio para Groq (30s). O arquivo pode ser muito grande.";
+    }
+
+    return NextResponse.json({ error: errorMsg }, { status: 500 });
   }
 }

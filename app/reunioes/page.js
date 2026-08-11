@@ -14,6 +14,8 @@ export default function ReunioesPage() {
   const [error, setError] = useState(null);
   const [running, setRunning] = useState(null); // meetingId em transcrição
   const [open, setOpen] = useState(null); // meetingId com ata aberta
+  const [testingGroq, setTestingGroq] = useState(false);
+  const [testGroqResult, setTestGroqResult] = useState(null);
 
   async function load() {
     try {
@@ -46,9 +48,39 @@ export default function ReunioesPage() {
       await load();
       setOpen(meetingId);
     } catch (err) {
-      setError(err.message);
+      setError(`Erro na transcrição: ${err.message}`);
+      console.error("Erro ao transcrever:", err);
     } finally {
       setRunning(null);
+    }
+  }
+
+  async function testarGroq() {
+    setTestingGroq(true);
+    setTestGroqResult(null);
+    try {
+      const res = await fetch("/api/test-groq", {
+        method: "POST",
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setTestGroqResult({
+          success: false,
+          error: data.error || `Erro ${res.status}`,
+        });
+      } else {
+        setTestGroqResult({
+          success: true,
+          message: data.message,
+        });
+      }
+    } catch (err) {
+      setTestGroqResult({
+        success: false,
+        error: err.message,
+      });
+    } finally {
+      setTestingGroq(false);
     }
   }
 
@@ -62,6 +94,52 @@ export default function ReunioesPage() {
       }}
     >
       <h1>Reuniões</h1>
+      <div
+        style={{
+          border: "2px solid #f97316",
+          borderRadius: 8,
+          padding: "1rem",
+          marginBottom: "1.5rem",
+          background: "#fef3c7",
+        }}
+      >
+        <div style={{ fontWeight: 600, marginBottom: "0.5rem" }}>
+          🧪 Teste da API Groq
+        </div>
+        <p style={{ margin: "0 0 0.75rem 0", fontSize: 14, color: "#666" }}>
+          Clique para verificar se sua chave GROQ_API_KEY está configurada e conectando corretamente.
+        </p>
+        <button
+          onClick={testarGroq}
+          disabled={testingGroq}
+          style={{
+            padding: "0.5rem 1rem",
+            borderRadius: 6,
+            border: "none",
+            background: testingGroq ? "#999" : "#f97316",
+            color: "#fff",
+            cursor: testingGroq ? "default" : "pointer",
+            fontSize: 14,
+          }}
+        >
+          {testingGroq ? "Testando..." : "Testar Groq"}
+        </button>
+        {testGroqResult && (
+          <div
+            style={{
+              marginTop: "0.75rem",
+              padding: "0.75rem",
+              borderRadius: 4,
+              background: testGroqResult.success ? "#dcfce7" : "#fee2e2",
+              color: testGroqResult.success ? "#166534" : "#991b1b",
+              fontSize: 13,
+            }}
+          >
+            {testGroqResult.success ? "✓ " : "✗ "}
+            {testGroqResult.message || testGroqResult.error}
+          </div>
+        )}
+      </div>
       <p style={{ color: "#666" }}>
         Grave pela extensão. Aqui você dispara a transcrição e lê a ata.
       </p>
