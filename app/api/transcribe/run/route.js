@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+﻿import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import OpenAI from "openai";
 
@@ -51,28 +51,26 @@ export async function POST(req) {
 
       const buffer = Buffer.from(await fileData.arrayBuffer());
 
-      // Whisper via fetch nativo (undici) — evita o ECONNRESET do transporte
-      // node-fetch do SDK. Whisper extrai o áudio do container .webm de vídeo.
       const form = new FormData();
       form.append(
         "file",
         new Blob([buffer], { type: "video/webm" }),
         `chunk-${chunk.chunk_index}.webm`
       );
-      form.append("model", "whisper-1");
+      form.append("model", "whisper-large-v3");
       form.append("language", "pt");
 
       const res = await fetch(
-        "https://api.openai.com/v1/audio/transcriptions",
+        "https://api.groq.com/openai/v1/audio/transcriptions",
         {
           method: "POST",
-          headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
+          headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
           body: form,
         }
       );
       if (!res.ok) {
         const detail = await res.text();
-        throw new Error(`Whisper retornou ${res.status}: ${detail}`);
+        throw new Error(`Groq Whisper retornou ${res.status}: ${detail}`);
       }
       const transcription = await res.json();
 
